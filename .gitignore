@@ -1,0 +1,6 @@
+*.jar
+node_modules/
+server/*
+!server/server.properties
+!server/server.jar
+versions/*
