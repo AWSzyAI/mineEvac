@@ -1,0 +1,19 @@
+{
+  "name": "layout_1",
+  "frame": { "x1": 0, "z1": 0, "x2": 80, "z2": 36 },
+  "corridor": { "x": 4, "z": 14, "w": 72, "h": 8 },
+  "rooms_top": [
+    { "x": 8,  "z": 22, "w": 20, "h": 10, "block": "lime_wool" },
+    { "x": 32, "z": 22, "w": 20, "h": 10, "block": "yellow_wool" },
+    { "x": 56, "z": 22, "w": 20, "h": 10, "block": "magenta_wool" }
+  ],
+  "rooms_bottom": [
+    { "x": 8,  "z": 2, "w": 20, "h": 12, "block": "cyan_wool" },
+    { "x": 32, "z": 2, "w": 20, "h": 12, "block": "purple_wool" },
+    { "x": 56, "z": 2, "w": 20, "h": 12, "block": "blue_wool" }
+  ],
+  "doors": { "topZ": 22, "bottomZ": 13, "xs": [18, 42, 66] },
+  "wall": { "material": "white_concrete", "height": 3 },
+  "corridor_floor": "light_gray_concrete",
+  "exit_marker": "red_wool" 
+}

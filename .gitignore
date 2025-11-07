@@ -3,4 +3,6 @@ node_modules/
 server/*
 !server/server.properties
 !server/server.jar
+!server/eula.txt
 versions/*
+log/*

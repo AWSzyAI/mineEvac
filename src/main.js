@@ -63,12 +63,26 @@ const WORLD_DIR = process.env.WORLD_DIR
 
 // ---------- 读取 building 配置（默认 baseline.json，可用 BUILDING 环境变量切换） ----------
 const BUILDING_NAME = process.env.BUILDING || 'baseline'
-const CONFIG_PATH = path.resolve(__dirname, 'buildings', 'configs', `${BUILDING_NAME}.json`)
+const CONFIG_CANDIDATES = [
+  path.resolve(__dirname, 'buildings', 'configs', `${BUILDING_NAME}.json`), // 旧路径（兼容）
+  path.resolve(__dirname, '../layout', `${BUILDING_NAME}.json`)              // 新路径（推荐）
+]
 let CONF
 try {
-  const rawConf = await fsp.readFile(CONFIG_PATH, 'utf8')
-  CONF = JSON.parse(rawConf)
-  console.log(`[building] 使用配置 ${BUILDING_NAME}.json`)
+  let found = null, lastErr = null
+  for (const pth of CONFIG_CANDIDATES) {
+    try {
+      const raw = await fsp.readFile(pth, 'utf8')
+      CONF = JSON.parse(raw)
+      found = pth
+      break
+    } catch (e) { lastErr = e }
+  }
+  if (found) {
+    console.log(`[building] 使用配置 ${BUILDING_NAME}.json -> ${path.relative(process.cwd(), found)}`)
+  } else {
+    throw lastErr || new Error('未找到配置文件')
+  }
 } catch (e) {
   console.log(`[building] 配置加载失败，使用内置 baseline：${e?.message || e}`)
   CONF = {
@@ -276,7 +290,8 @@ async function ensureDatapack(){
   }
 }
 
-const OUT = path.resolve(__dirname, 'logs')
+// 输出日志目录迁移到项目根的 log/
+const OUT = path.resolve(__dirname, '../log')
 async function ensureOut(){
   await fsp.mkdir(OUT, { recursive: true })
   await fsp.writeFile(path.join(OUT,'events.csv'), 't,event,detail\n')
@@ -306,8 +321,9 @@ bot.once('spawn', async () => {
     await ensureOut()
     await ensureDatapack()
 
-    // 让所有非机器人玩家切到 creative，立刻可飞
-    await Q.chatCommand(`gamemode creative @a[name!=${BOT_NAME}]`, 800)
+  // 让所有非机器人玩家切到 creative，立刻可飞（新的选择器语法：name=!<botName>）
+  const NON_BOT = `@a[name=!${BOT_NAME}]`
+  await Q.chatCommand(`gamemode creative ${NON_BOT}`, 800)
     await Q.chatCommand('difficulty peaceful', 800)
     await Q.chatCommand('gamerule doMobSpawning false', 800)
     await Q.chatCommand('gamerule doDaylightCycle false', 800)
@@ -651,6 +667,20 @@ console.log('\n🧭 控制菜单：\n----------------------------------\n build 
 rl.on('line', async (input)=>{
   const msg = input.trim().toLowerCase()
   if (msg === 'build')       await buildLayout()
+  else if (msg === 'build?') {
+    console.log('\n可选布局:')
+    console.log('  1) baseline (layout/baseline.json)')
+    console.log('  2) layout_1 (layout/layout_1.json)')
+    console.log('  3) layout_2 (layout/layout_2.json)')
+    console.log('输入编号或名称继续 (例如: 2 或 layout_1)，空回车取消')
+    rl.question('选择布局: ', async ans => {
+      const a = ans.trim().toLowerCase()
+      if (!a) return console.log('取消。')
+      const mapping = { '1':'baseline', '2':'layout_1', '3':'layout_2' }
+      const chosen = mapping[a] || a
+      await switchBuilding(chosen)
+    })
+  }
   else if (msg === 'spawn')  await spawnActors()
   else if (msg === 'patrol') await startPatrol()
   else if (msg === 'stop')   stopPatrol()
@@ -666,3 +696,40 @@ rl.on('line', async (input)=>{
   else if (msg === 'quit' || msg === 'exit') { stopPatrol(); console.log('👋 Bye'); setTimeout(()=>{ rl.close(); bot.quit(); process.exit(0) }, 300) }
   else console.log('未知命令：build / spawn / patrol / stop / status / quit')
 })
+
+// —— 切换布局：重新读取 JSON，重算派生数据并执行 build —— //
+async function switchBuilding(name){
+  try {
+    const candidates = [
+      path.resolve(__dirname, 'buildings', 'configs', `${name}.json`),
+      path.resolve(__dirname, '../layout', `${name}.json`)
+    ]
+    let loaded = null
+    for (const pth of candidates){
+      try {
+        const raw = await fsp.readFile(pth, 'utf8')
+        CONF = JSON.parse(raw)
+        loaded = pth
+        break
+      } catch (_) {}
+    }
+    if (!loaded) {
+      console.log(`[building] 未找到 ${name}.json，保留当前布局`) ; return
+    }
+    console.log(`[building] 切换到 ${name}.json -> ${path.relative(process.cwd(), loaded)}`)
+    // 更新核心引用
+    Object.assign(FRAME, CONF.frame)
+    Object.assign(CORRIDOR_MAIN, CONF.corridor)
+    // 更新房间、门等（注意不可直接重新赋值常量，这里用重新生成数组方式）
+    ROOMS_TOP.splice(0, ROOMS_TOP.length, ...(CONF.rooms_top||[]))
+    ROOMS_BOTTOM.splice(0, ROOMS_BOTTOM.length, ...(CONF.rooms_bottom||[]))
+    // 门配置
+    const doorsDef = CONF.doors || {}
+    DOOR_XS.splice(0, DOOR_XS.length, ...(Array.isArray(doorsDef.xs)?doorsDef.xs:[20,52,84]))
+    // 重算外墙 Z 与巡逻/出口等派生
+    recomputeDerived()
+    await buildLayout()
+  } catch (e){
+    console.log('[building] 切换失败：', e?.message || e)
+  }
+}
