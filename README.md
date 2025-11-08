@@ -5,6 +5,8 @@ git clone xxx
 cd mineEvac
 cd server
 java -Xmx2G -Xms1G -jar server.jar nogui
+ps aux | grep server.jar
+
 ```
 
 ```bash
