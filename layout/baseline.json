@@ -1,19 +1,33 @@
 {
   "name": "baseline",
-  "frame": { "x1": 0, "z1": 0, "x2": 100, "z2": 40 },
-  "corridor": { "x": 5, "z": 16, "w": 90, "h": 8 },
+  "frame": { "x1": 8, "z1": 1, "x2": 97, "z2": 35 },
+
+  "corridor": { "x": 8, "z": 16, "w": 90, "h": 8 },
+
   "rooms_top": [
-    { "x": 8,  "z": 24, "w": 24, "h": 12, "block": "orange_wool" },
-    { "x": 40, "z": 24, "w": 24, "h": 12, "block": "green_wool" },
-    { "x": 72, "z": 24, "w": 24, "h": 12, "block": "pink_wool" }
+    { "x": 8,  "z": 24, "w": 30, "h": 12, "block": "orange_wool" },
+    { "x": 38, "z": 24, "w": 30, "h": 12, "block": "green_wool"  },
+    { "x": 68, "z": 24, "w": 30, "h": 12, "block": "pink_wool"   }
   ],
   "rooms_bottom": [
-    { "x": 8,  "z": 1, "w": 24, "h": 15, "block": "cyan_wool" },
-    { "x": 40, "z": 1, "w": 24, "h": 15, "block": "purple_wool" },
-    { "x": 72, "z": 1, "w": 24, "h": 15, "block": "blue_wool" }
+    { "x": 8,  "z": 1, "w": 30, "h": 15, "block": "cyan_wool"   },
+    { "x": 38, "z": 1, "w": 30, "h": 15, "block": "purple_wool" },
+    { "x": 68, "z": 1, "w": 30, "h": 15, "block": "blue_wool"   }
   ],
-  "doors": { "topZ": 24, "bottomZ": 15, "xs": [20, 52, 84] },
+
+  "doors": { "topZ": 24, "bottomZ": 15, "xs": [23, 53, 83] },
+
   "wall": { "material": "white_concrete", "height": 3 },
   "corridor_floor": "white_concrete",
-  "exit_marker": "green_wool"
+  "exit_marker": "green_wool",
+
+  "occupants": { "per_room": 5 },
+
+  "_notes": {
+    "layout_y": "所有地面（走廊与房间地板）铺在 LAYOUT_Y；墙从 LAYOUT_Y+1 到 LAYOUT_Y+wall.height。",
+    "alignment": "走廊 z=16..23；上排房间 z=24..35；下排房间 z=1..15。门洞分别在 z=24 与 z=15 的外墙上。",
+    "x_range": "三间房横向区间分别是 [8..37], [38..67], [68..97]，走廊 x=8..97，与两端出口齐平。",
+    "exits": "出口位于 (8, 中线) 与 (97, 中线)；代码会在出口外侧沿 X 方向挖空形成坠落带，保证“出门即坠落”。",
+    "frame": "frame 正好包裹建筑本体，不留多余边缘；clean 只会把 frame 内地表恢复。"
+  }
 }

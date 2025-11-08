@@ -3,17 +3,23 @@
   "frame": { "x1": 0, "z1": 0, "x2": 80, "z2": 36 },
   "corridor": { "x": 4, "z": 14, "w": 72, "h": 8 },
   "rooms_top": [
-    { "x": 8,  "z": 22, "w": 20, "h": 10, "block": "lime_wool" },
-    { "x": 32, "z": 22, "w": 20, "h": 10, "block": "yellow_wool" },
-    { "x": 56, "z": 22, "w": 20, "h": 10, "block": "magenta_wool" }
+    { "x": 4,  "z": 22, "w": 24, "h": 11, "block": "lime_wool" },
+    { "x": 28, "z": 22, "w": 16, "h": 9,  "block": "yellow_wool" },
+    { "x": 44, "z": 22, "w": 32, "h": 13, "block": "magenta_wool" }
   ],
   "rooms_bottom": [
-    { "x": 8,  "z": 2, "w": 20, "h": 12, "block": "cyan_wool" },
-    { "x": 32, "z": 2, "w": 20, "h": 12, "block": "purple_wool" },
-    { "x": 56, "z": 2, "w": 20, "h": 12, "block": "blue_wool" }
+    { "x": 4,  "z": 2, "w": 22, "h": 12, "block": "cyan_wool" },
+    { "x": 26, "z": 2, "w": 26, "h": 12, "block": "purple_wool" },
+    { "x": 52, "z": 2, "w": 20, "h": 12, "block": "blue_wool" }
   ],
-  "doors": { "topZ": 22, "bottomZ": 13, "xs": [18, 42, 66] },
+  "doors": { "topZ": 22, "bottomZ": 13, "xs": [16, 36, 60] },
   "wall": { "material": "white_concrete", "height": 3 },
   "corridor_floor": "light_gray_concrete",
-  "exit_marker": "red_wool" 
+  "exit_marker": "red_wool",
+  "_notes": {
+    "asymmetry": "该方案刻意不对称：三间房的宽/高与颜色均不同。",
+    "contiguity": "同一排房间横向连续无缝：顶排 x 段 [4..27],[28..43],[44..75]；底排 [4..25],[26..51],[52..71]。相邻房间共享一堵墙。",
+    "height": "地面层为 LAYOUT_Y：走廊地面用 corridor_floor，房间地面用各自的彩色方块；墙体从 LAYOUT_Y+1 起砌到 LAYOUT_Y+wall.height；门洞高度 2（LAYOUT_Y+1..+2）。",
+    "z_alignment": "走廊 z:14..21；上侧房从 z=22（与走廊上沿共享外墙）；下侧房终止于 z=13（与走廊下沿共享外墙）。"
+  }
 }

@@ -1,19 +1,28 @@
 {
   "name": "layout_2",
-  "frame": { "x1": 0, "z1": 0, "x2": 120, "z2": 48 },
-  "corridor": { "x": 6, "z": 18, "w": 108, "h": 12 },
+  "frame": { "x1": 0, "z1": 0, "x2": 120, "z2": 54 },
+  "corridor": { "x": 6, "z": 20, "w": 108, "h": 12 },
   "rooms_top": [
-    { "x": 10,  "z": 32, "w": 28, "h": 12, "block": "orange_wool" },
-    { "x": 46,  "z": 32, "w": 28, "h": 12, "block": "green_wool" },
-    { "x": 82,  "z": 32, "w": 28, "h": 12, "block": "pink_wool" }
+    { "x": 6,  "z": 32, "w": 26, "h": 10, "block": "orange_wool" },
+    { "x": 32, "z": 32, "w": 20, "h": 16, "block": "green_wool" },
+    { "x": 52, "z": 32, "w": 30, "h": 12, "block": "pink_wool" },
+    { "x": 82, "z": 32, "w": 28, "h": 14, "block": "light_blue_wool" }
   ],
   "rooms_bottom": [
-    { "x": 10,  "z": 2,  "w": 28, "h": 14, "block": "cyan_wool" },
-    { "x": 46,  "z": 2,  "w": 28, "h": 14, "block": "purple_wool" },
-    { "x": 82,  "z": 2,  "w": 28, "h": 14, "block": "blue_wool" }
+    { "x": 6,  "z": 2,  "w": 24, "h": 14, "block": "cyan_wool" },
+    { "x": 30, "z": 2,  "w": 28, "h": 12, "block": "purple_wool" },
+    { "x": 58, "z": 2,  "w": 22, "h": 15, "block": "blue_wool" },
+    { "x": 80, "z": 2,  "w": 34, "h": 13, "block": "yellow_wool" }
   ],
-  "doors": { "topZ": 32, "bottomZ": 15, "xs": [24, 60, 96] },
+  "doors": { "topZ": 32, "bottomZ": 19, "xs": [18, 44, 70, 96] },
   "wall": { "material": "white_concrete", "height": 3 },
   "corridor_floor": "white_concrete",
-  "exit_marker": "green_wool" 
+  "exit_marker": "green_wool",
+  "_notes": {
+    "asymmetry": "增加第四间房并让每间宽高不同，上下排不一一对应，形成明显非对称布局。",
+    "contiguity": "顶排房间区间：[6..31],[32..51],[52..81],[82..109]；底排：[6..29],[30..57],[58..79],[80..113]，横向连续共享墙。",
+    "z_alignment": "走廊 z:20..31。顶排房自 z=32 起，与走廊上沿相邻；底排房终止于 z=19，与走廊下沿相邻。",
+    "height": "所有彩色块与走廊地板都在 LAYOUT_Y。墙体高度 = wall.height，从 LAYOUT_Y+1 起。门洞高度 2 格。",
+    "frame": "frame.x2 / frame.z2 扩展以包住新增的更宽更高房间集合。"
+  }
 }

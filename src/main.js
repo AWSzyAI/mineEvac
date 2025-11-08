@@ -1,5 +1,5 @@
 // filename: baseline.mjs
-// 终端菜单：build / spawn / patrol / stop / status / quit
+// 终端菜单：clean / build / occupants / spawn / patrol / stop / status / quit
 // （可选）网页：安装 prismarine-viewer 后访问 http://localhost:3000
 // 反 SPAM：大延时+极简命令（不画黑边），必要时提高 CMD_DELAY_MS
 
@@ -28,6 +28,52 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
+// ------- PlaceTracker：记录“放过什么块/区域”，以便精准清理 ------- //
+class PlaceTracker {
+  constructor() {
+    this.boxes = []   // {x1,y1,z1,x2,y2,z2, block}
+    this.single = []  // {x,y,z, block}
+  }
+  static norm(x1,y1,z1,x2,y2,z2){
+    return {
+      x1: Math.min(x1,x2), y1: Math.min(y1,y2), z1: Math.min(z1,z2),
+      x2: Math.max(x1,x2), y2: Math.max(y1,y2), z2: Math.max(z1,z2)
+    }
+  }
+  recordFill(x1,y1,z1,x2,y2,z2, block){
+    this.boxes.push({...PlaceTracker.norm(x1,y1,z1,x2,y2,z2), block})
+  }
+  recordSet(x,y,z, block){ this.single.push({x,y,z, block}) }
+  async clearAll(Q){
+    for (const b of this.boxes) {
+      await Q.chatCommand(`fill ${b.x1} ${b.y1} ${b.z1} ${b.x2} ${b.y2} ${b.z2} air`, CMD_HEAVY_PAD_MS)
+    }
+    for (const s of this.single) {
+      await Q.chatCommand(`setblock ${s.x} ${s.y} ${s.z} air`, 200)
+    }
+    this.boxes.length = 0
+    this.single.length = 0
+  }
+}
+const PT = new PlaceTracker()
+
+// —— worldborder 以原点为中心 —— //
+function frameCenter(){
+  return { cx: 0, cz: 0 }
+}
+async function applyWorldBorder(padding = 16){
+  const {cx, cz} = frameCenter()
+  // 以 FRAME 的最大边 + padding 作为直径
+  const w = FRAME.x2 - FRAME.x1 + 1 + padding*2
+  const h = FRAME.z2 - FRAME.z1 + 1 + padding*2
+  const size = Math.max(w, h)
+  await Q.chatCommand(`worldborder center ${cx} ${cz}`, 400)
+  await Q.chatCommand(`worldborder set ${size}`, 400)
+  await Q.chatCommand(`worldborder damage buffer 0`, 200)
+  await Q.chatCommand(`worldborder warning distance 2`, 200)
+  console.log(`🧱 WorldBorder 已设置：中心(${cx},${cz})，直径≈${size}`)
+}
+
 // ---------- 参数 ----------
 const BOT_NAME = 'sweeper'
 const HOST = '127.0.0.1'
@@ -37,21 +83,10 @@ const PORT = 25565
 const CMD_DELAY_MS = Number(process.env.CMD_DELAY_MS || 600)
 const CMD_HEAVY_PAD_MS = Number(process.env.CMD_HEAVY_PAD_MS || 900)
 
-// 超平坦模式：设置环境变量 FLAT=1 切换（或直接改下面的默认）
-const IS_FLAT = process.env.FLAT === '1'
-// 支持强制指定基准高度：BASE_Y 优先，其次根据是否平坦选择 4 或 64
-const BASE_Y_ENV = process.env.BASE_Y
-const Y = (BASE_Y_ENV !== undefined && !Number.isNaN(Number(BASE_Y_ENV)))
-  ? Number(BASE_Y_ENV)
-  : (IS_FLAT ? 4 : 64)
-// 布局构建层：距离地面 1 格（ground 在 Y-1，因此默认放在 Y）。
-// 可通过环境变量 BUILD_OFFSET 调整相对地面的偏移（默认 0 -> 放在 Y）。
-const BUILD_OFFSET = Number(process.env.BUILD_OFFSET || 0)
-// const LAYOUT_Y = Y + BUILD_OFFSET
+// —— 地面基准（贴地）：默认 y=4 —— //
+const Y = 4
+const BUILD_OFFSET = 0
 let LAYOUT_Y = Y + BUILD_OFFSET
-// 目标原点（默认对齐到世界坐标 0,0，可通过环境变量覆盖）
-const ORIGIN_X = Number(process.env.ORIGIN_X || 0)
-const ORIGIN_Z = Number(process.env.ORIGIN_Z || 0)
 
 // 是否允许写入服务器 world（默认允许；设置 USE_DATAPACK=0 则不改世界，仅用命令强制环境）
 const USE_DATAPACK = process.env.USE_DATAPACK !== '0'
@@ -59,7 +94,6 @@ const USE_DATAPACK = process.env.USE_DATAPACK !== '0'
 const WORLD_DIR = process.env.WORLD_DIR
   ? path.resolve(__dirname, process.env.WORLD_DIR)
   : path.resolve(__dirname, '../server/world')
-
 
 // ---------- 读取 building 配置（默认 baseline.json，可用 BUILDING 环境变量切换） ----------
 const BUILDING_NAME = process.env.BUILDING || 'baseline'
@@ -102,31 +136,28 @@ try {
     doors: { topZ: 24, bottomZ: 15, xs: [20, 52, 84] },
     wall: { material: 'white_concrete', height: 3 },
     corridor_floor: 'white_concrete',
-    exit_marker: 'green_wool'
+    exit_marker: 'green_wool',
+    occupants: { num: 5 }
   }
 }
 const FRAME          = CONF.frame
-const CORRIDOR_MAIN  = CONF.corridor  // 一条走廊（z:16..23）
+const CORRIDOR_MAIN  = CONF.corridor  // 一条走廊（例如 z:16..23）
 
-// —— 坐标偏移与同步点 —— //
-// 将主走廊中心对齐到 ORIGIN_X/ORIGIN_Z，以便建筑整体贴近世界原点
-const MID_X = Math.floor((CORRIDOR_MAIN.x * 2 + CORRIDOR_MAIN.w) / 2)
-const MID_Z = CORRIDOR_MAIN.z + Math.floor(CORRIDOR_MAIN.h / 2)
-const SHIFT_X = ORIGIN_X - MID_X
-const SHIFT_Z = ORIGIN_Z - MID_Z
+// —— 坐标偏移：把 FRAME 左下角贴到世界原点(0,0) —— //
+const SHIFT_X = -FRAME.x1
+const SHIFT_Z = -FRAME.z1
 
-// 建筑内部“同步点”
-const SPAWN_X = MID_X + SHIFT_X
-const SPAWN_Z = MID_Z + SHIFT_Z
-// const SPAWN_Y = LAYOUT_Y + 1 // 站在地面上一格，避免卡方块
+// —— 建筑内部“同步点”：默认原点，后续根据布局动态调整到“走廊中心的可站立空间” —— //
+let SPAWN_X = 0
+let SPAWN_Z = 0
 let SPAWN_Y = LAYOUT_Y + 1
 
 // 房间来自配置
-const ROOMS_TOP = CONF.rooms_top
-const ROOMS_BOTTOM = CONF.rooms_bottom
+const ROOMS_TOP = [...(CONF.rooms_top || [])]
+const ROOMS_BOTTOM = [...(CONF.rooms_bottom || [])]
 
 // 门配置（在与走廊外墙相接处开门）
-const DOOR_XS = (CONF.doors && Array.isArray(CONF.doors.xs)) ? CONF.doors.xs : [20,52,84]
+const DOOR_XS = Array.isArray(CONF.doors?.xs) ? [...CONF.doors.xs] : [20, 52, 84]
 const TOP_WALL_Z = (CONF.doors?.topZ ?? 24) + SHIFT_Z
 const BOT_WALL_Z = (CONF.doors?.bottomZ ?? 15) + SHIFT_Z
 const TOP_DOOR_Z_CORRIDOR = (CONF.doors?.topZ ?? 24) - 1 + SHIFT_Z
@@ -141,8 +172,8 @@ let PATROL = [...DOOR_POS]
 
 // 出口：走廊两端中线
 let EXITS = [
-  { x: CORRIDOR_MAIN.x + SHIFT_X,                       y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor(CORRIDOR_MAIN.h/2) + SHIFT_Z },
-  { x: CORRIDOR_MAIN.x + CORRIDOR_MAIN.w - 1 + SHIFT_X, y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor(CORRIDOR_MAIN.h/2) + SHIFT_Z },
+  { x: CORRIDOR_MAIN.x + SHIFT_X,                       y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor((CORRIDOR_MAIN.h||1)/2) + SHIFT_Z },
+  { x: CORRIDOR_MAIN.x + (CORRIDOR_MAIN.w||1) - 1 + SHIFT_X, y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor((CORRIDOR_MAIN.h||1)/2) + SHIFT_Z },
 ]
 
 // ---------- 命令队列（串行+延迟，含兜底发包） ----------
@@ -175,16 +206,13 @@ class CommandQueue {
 // —— 统一的命令发送（优先 bot.chat，失败则发包兜底） —— //
 async function sendSlashCommand(bot, cmd) {
   const line = '/' + String(cmd)
-  // 1) 官方 API
   if (typeof bot?.chat === 'function') {
-    try { bot.chat(line); return } catch (_) { /* fallback */ }
+    try { bot.chat(line); return } catch (_) {}
   }
-  // 2) 旧版/通用：chat_message
   try {
     bot?._client?.write('chat_message', { message: line })
     return
-  } catch (_) { /* fallback */ }
-  // 3) 新版（1.19+）：chat_command
+  } catch (_) {}
   try {
     const now = BigInt(Date.now())
     bot?._client?.write('chat_command', {
@@ -202,24 +230,22 @@ async function sendSlashCommand(bot, cmd) {
 }
 
 // ---------- Bot ----------
-// const bot = mineflayer.createBot({ host: HOST, port: PORT, username: BOT_NAME })
 const bot = mineflayer.createBot({
   host: HOST,
   port: PORT,
   username: BOT_NAME,
-  version: "1.20.1" 
+  version: "1.20.1"
 })
-
 bot.loadPlugin(pathfinder)
 
 let mcData, movements
 let tick = 0, patrolIdx = 0, dwell = 0
 const DWELL_K = 8
 let demoTimer = null
-let doorsState = PATROL.map((p,i)=>({idx:i, x:p.x, y:p.y, z:p.z, cleared:false, cleared_tick:-1}))
+let doorsState = []
 const Q = new CommandQueue(bot)
 
-// 锁定与同步控制（默认解锁，允许移动）
+// 锁定与同步控制
 let LOCKED = false
 let LOCKED_TO_PLAYER = false
 let _syncInterval = null
@@ -229,9 +255,8 @@ function lockToOrigin(){
   LOCKED_TO_PLAYER = false
   if (_syncInterval) { clearInterval(_syncInterval); _syncInterval = null }
   Q.chatCommand(`tp ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 800)
-  console.log(`🔒 bot 已锁定并传送到内部同步点 (${SPAWN_X}, ${SPAWN_Y}, ${SPAWN_Z})`) 
+  console.log(`🔒 bot 已锁定并传送到内部同步点 (${SPAWN_X}, ${SPAWN_Y}, ${SPAWN_Z})`)
 }
-
 function lockToNearestPlayer(){
   LOCKED = true
   LOCKED_TO_PLAYER = true
@@ -252,7 +277,6 @@ function lockToNearestPlayer(){
     }
   }, 2000)
 }
-
 function unlockMovement(){
   LOCKED = false
   LOCKED_TO_PLAYER = false
@@ -260,7 +284,7 @@ function unlockMovement(){
   console.log('🔓 bot 已解锁（允许移动/巡逻）')
 }
 
-// —— 确保 datapack 存在：如果 world 被删，自动重建 datapack 并可触发 reload —— //
+// —— datapack —— //
 const DP_ROOT = path.resolve(WORLD_DIR, 'datapacks', 'force_origin')
 async function ensureDatapack(){
   if (!USE_DATAPACK) {
@@ -269,28 +293,66 @@ async function ensureDatapack(){
   }
   const files = [
     { p: path.join(DP_ROOT, 'pack.mcmeta'),
-      c: '{\n  "pack": {\n    "pack_format": 15,\n    "description": "Force origin spawn; no mobs; player creative by default"\n  }\n}\n' },
+      c: '{\n  "pack": {\n    "pack_format": 15,\n    "description": "Force origin spawn; mob-free via gamerules; player creative"\n  }\n}\n',
+      overwrite: true
+    },
     { p: path.join(DP_ROOT, 'data/minecraft/tags/functions/load.json'),
-      c: '{\n  "values": [\n    "force_origin:load"\n  ]\n}\n' },
+      c: '{\n  "values": [\n    "force_origin:load"\n  ]\n}\n',
+      overwrite: true
+    },
     { p: path.join(DP_ROOT, 'data/minecraft/tags/functions/tick.json'),
-      c: '{\n  "values": [\n    "force_origin:tick"\n  ]\n}\n' },
+      c: '{\n  "values": [\n    "force_origin:tick"\n  ]\n}\n',
+      overwrite: true
+    },
+
+    // —— 世界初始化：用 gamerule/难度 来禁止自然刷新和巡逻/商人/幻翼/袭击 —— //
     { p: path.join(DP_ROOT, 'data/force_origin/functions/load.mcfunction'),
-      c: `# 初始化：创建 scoreboard、设置世界重生点，并固定为白天无天气变化\nscoreboard objectives add joined dummy\nsetworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}\n# 禁止自然生成生物\ngamerule doMobSpawning false\n# 永远白天与晴朗\ngamerule doDaylightCycle false\ntime set day\ngamerule doWeatherCycle false\nweather clear 1000000\n# 装载时将已在线的玩家标记为已处理\nexecute as @a run scoreboard players set @s joined 1\n` },
+      c: `scoreboard objectives add joined dummy
+setworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}
+
+# 不生成生物/怪物（包含被动/敌对的自然刷新）
+difficulty peaceful
+gamerule doMobSpawning false
+
+# 禁止巡逻队、流浪商人、幻翼、袭击等特殊刷新/事件
+gamerule doPatrolSpawning false
+gamerule doTraderSpawning false
+gamerule doInsomnia false
+gamerule disableRaids true
+
+# 其余环境与可视稳定
+gamerule doDaylightCycle false
+gamerule doWeatherCycle false
+time set day
+weather clear 1000000
+gamerule spawnRadius 0
+
+# 标记已有玩家为 joined=1，避免首次 tick 触发传送
+execute as @a run scoreboard players set @s joined 1
+`,
+      overwrite: true
+    },
+
+    // —— 每 tick：只做玩家初始化与环境维持，不做任何 kill —— //
     { p: path.join(DP_ROOT, 'data/force_origin/functions/tick.mcfunction'),
-      c: `# 每 tick：首次加入玩家传送到内部同步点；给予玩家创造模式；清理非玩家实体\n# 1) 把首次加入玩家送到建筑内部并标记\nexecute as @a[scores={joined=0}] at @s run tp @s ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}\nexecute as @a[scores={joined=0}] run scoreboard players set @s joined 1\n\n# 2) 给予创造模式（便于自由移动/飞行）\ngamemode creative @a\n\n# 3) 清理非玩家实体（保留常见无害实体）\nkill @e[type=!player,type=!item,type=!arrow,type=!experience_orb,type=!boat,type=!minecart,type=!painting,type=!armor_stand]\n` }
+      c: `execute as @a[scores={joined=0}] at @s run tp @s ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}
+execute as @a[scores={joined=0}] run scoreboard players set @s joined 1
+
+gamemode creative @a
+# 不再有任何 kill 行为；世界由 gamerule 控制不刷新生物/怪物
+`,
+      overwrite: true
+    }
   ]
+
   for (const f of files){
     await fsp.mkdir(path.dirname(f.p), { recursive: true })
-    try {
-      await fsp.stat(f.p)
-      // 若已存在则跳过写入，保留你手动改动
-    } catch {
-      await fsp.writeFile(f.p, f.c)
-    }
+    await fsp.writeFile(f.p, f.c)
   }
+  console.log('[datapack] 写入完成（基于 gamerule 的无生物/怪物世界，已禁用 kill）')
 }
 
-// 输出日志目录迁移到项目根的 log/
+// 输出日志目录
 const OUT = path.resolve(__dirname, '../log')
 async function ensureOut(){
   await fsp.mkdir(OUT, { recursive: true })
@@ -298,6 +360,7 @@ async function ensureOut(){
   await fsp.writeFile(path.join(OUT,'responder_track.csv'), 't,x,y,z\n')
   await fsp.writeFile(path.join(OUT,'villagers_track.csv'), 't,id,x,y,z\n')
   const doorHeader = 'door_idx,x,y,z,cleared,cleared_tick\n'
+  doorsState = DOOR_POS.map((p,i)=>({idx:i, x:p.x, y:p.y, z:p.z, cleared:false, cleared_tick:-1}))
   await fsp.writeFile(path.join(OUT,'doors.csv'),
     doorHeader + doorsState.map(d=>`${d.idx},${d.x},${d.y},${d.z},false,-1`).join('\n') + '\n')
 }
@@ -321,20 +384,15 @@ bot.once('spawn', async () => {
     await ensureOut()
     await ensureDatapack()
 
-  // 让所有非机器人玩家切到 creative，立刻可飞（新的选择器语法：name=!<botName>）
-  const NON_BOT = `@a[name=!${BOT_NAME}]`
-  await Q.chatCommand(`gamemode creative ${NON_BOT}`, 800)
+    const NON_BOT = `@a[name=!${BOT_NAME}]`
+    await Q.chatCommand(`gamemode creative ${NON_BOT}`, 800)
     await Q.chatCommand('difficulty peaceful', 800)
     await Q.chatCommand('gamerule doMobSpawning false', 800)
     await Q.chatCommand('gamerule doDaylightCycle false', 800)
     await Q.chatCommand('time set day', 800)
     await Q.chatCommand('gamerule doWeatherCycle false', 800)
     await Q.chatCommand('weather clear 1000000', 800)
-    if (USE_DATAPACK) {
-      await Q.chatCommand('reload', 800) // 若刚重建 datapack，使其立即生效
-    }
-
-    console.log(`[height] BASE_Y=${Y}, BUILD_OFFSET=${BUILD_OFFSET}, LAYOUT_Y=${LAYOUT_Y}`)
+    if (USE_DATAPACK) await Q.chatCommand('reload', 800)
 
     mcData = minecraftData(bot.version)
     movements = new Movements(bot, mcData)
@@ -350,7 +408,7 @@ bot.once('spawn', async () => {
       console.log('（若需网页：npm i prismarine-viewer）')
     }
 
-    console.log('✅ bot 已上线。终端菜单：build / spawn / patrol / stop / status / quit')
+    console.log('✅ bot 已上线。终端菜单：clean / build / occupants / spawn / patrol / stop / status / quit')
   } catch (e) {
     console.log('spawn init error:', e)
   }
@@ -360,14 +418,81 @@ bot.on('end',    r => { console.log('[END]',    r); if (demoTimer) clearInterval
 
 function here(){ return bot.entity?.position?.clone() || new Vec3(0,0,0) }
 
+// —— 判定/寻找可安全站立的位置（两格高空气，上方不碰撞） —— //
+function isAirName(name){ return name === 'air' }
+function isPassableBlockName(name){
+  if (!name) return false
+  // 保守：仅当空气才认为可站立空间，避免卡在非完整方块（如草丛）
+  return name === 'air'
+}
+function canStandAt(x, y, z){
+  const below = getBlockSafe(x, y - 1, z)
+  const head  = getBlockSafe(x, y, z)
+  const top   = getBlockSafe(x, y + 1, z)
+  if (!below || !head || !top) return false
+  const belowSolid = (below.name && below.name !== 'air' && !below.name.includes('water') && !below.name.includes('lava'))
+  return belowSolid && isPassableBlockName(head.name) && isPassableBlockName(top.name)
+}
+function corridorCenterPos(){
+  const cx = (CORRIDOR_MAIN?.x ?? 0) + SHIFT_X + Math.floor(((CORRIDOR_MAIN?.w || 1) - 1) / 2)
+  const cz = (CORRIDOR_MAIN?.z ?? 0) + SHIFT_Z + Math.floor(((CORRIDOR_MAIN?.h || 1) - 1) / 2)
+  return { x: cx, y: LAYOUT_Y + 1, z: cz }
+}
+function* spiralOffsets(maxR = 6){
+  yield [0,0]
+  for (let r = 1; r <= maxR; r++){
+    for (let dx = -r; dx <= r; dx++){
+      yield [dx, -r]
+      yield [dx,  r]
+    }
+    for (let dz = -r + 1; dz <= r - 1; dz++){
+      yield [-r, dz]
+      yield [ r, dz]
+    }
+  }
+}
+function clamp(v, a, b){ return Math.max(a, Math.min(b, v)) }
+function inRect(x, z, rect){
+  const x1 = rect.x + SHIFT_X, z1 = rect.z + SHIFT_Z
+  const x2 = rect.x + rect.w - 1 + SHIFT_X
+  const z2 = rect.z + rect.h - 1 + SHIFT_Z
+  return x >= x1 && x <= x2 && z >= z1 && z <= z2
+}
+function findSafeSpotNearCorridor(base, maxR = 8){
+  // 在主走廊矩形内优先寻找；否则在相邻位置寻找
+  for (const [dx, dz] of spiralOffsets(maxR)){
+    const x = base.x + dx
+    const z = base.z + dz
+    if (CORRIDOR_MAIN && (CORRIDOR_MAIN.w||0) > 0 && (CORRIDOR_MAIN.h||0) > 0){
+      if (!inRect(x, z, CORRIDOR_MAIN)) continue
+    }
+    const y = LAYOUT_Y + 1
+    if (canStandAt(x, y, z)) return { x, y, z }
+  }
+  // 兜底：在 FRAME 区域内做一次较小范围搜索
+  const rect = { x: FRAME.x1, z: FRAME.z1, w: FRAME.x2 - FRAME.x1 + 1, h: FRAME.z2 - FRAME.z1 + 1 }
+  for (const [dx, dz] of spiralOffsets(maxR + 4)){
+    const x = clamp(base.x + dx, FRAME.x1 + SHIFT_X, FRAME.x2 + SHIFT_X)
+    const z = clamp(base.z + dz, FRAME.z1 + SHIFT_Z, FRAME.z2 + SHIFT_Z)
+    const y = LAYOUT_Y + 1
+    if (canStandAt(x, y, z)) return { x, y, z }
+  }
+  return null
+}
+function updateSpawn(pos){
+  if (!pos) return
+  SPAWN_X = pos.x; SPAWN_Y = pos.y; SPAWN_Z = pos.z
+}
+
 // —— 极简填充：不画黑边，只保留主体块 —— //
 async function fillRect(rect, block){
   const x1 = rect.x + SHIFT_X
   const z1 = rect.z + SHIFT_Z
   const x2 = rect.x + rect.w - 1 + SHIFT_X
   const z2 = rect.z + rect.h - 1 + SHIFT_Z
-  // 将平面块放在布局层（地面层 LAYOUT_Y）
-  await Q.chatCommand(`fill ${x1} ${LAYOUT_Y} ${z1} ${x2} ${LAYOUT_Y} ${z2} ${block}`)
+  const y  = LAYOUT_Y
+  await Q.chatCommand(`fill ${x1} ${y} ${z1} ${x2} ${y} ${z2} ${block}`)
+  PT.recordFill(x1, y, z1, x2, y, z2, block)
 }
 
 // 在矩形四周砌墙，高度为 height（默认3），不封顶
@@ -378,20 +503,22 @@ async function buildWalls(rect, material = 'white_concrete', height = 3){
   const z2 = rect.z + rect.h - 1 + SHIFT_Z
   const y1 = LAYOUT_Y + 1
   const y2 = LAYOUT_Y + height
-  // 上、下边
-  await Q.chatCommand(`fill ${x1} ${y1} ${z1} ${x2} ${y2} ${z1} ${material}`)
-  await Q.chatCommand(`fill ${x1} ${y1} ${z2} ${x2} ${y2} ${z2} ${material}`)
-  // 左、右边
-  await Q.chatCommand(`fill ${x1} ${y1} ${z1} ${x1} ${y2} ${z2} ${material}`)
-  await Q.chatCommand(`fill ${x2} ${y1} ${z1} ${x2} ${y2} ${z2} ${material}`)
+  const cmds = [
+    {a:[x1,y1,z1, x2,y2,z1]},
+    {a:[x1,y1,z2, x2,y2,z2]},
+    {a:[x1,y1,z1, x1,y2,z2]},
+    {a:[x2,y1,z1, x2,y2,z2]},
+  ]
+  for (const {a} of cmds){
+    await Q.chatCommand(`fill ${a[0]} ${a[1]} ${a[2]} ${a[3]} ${a[4]} ${a[5]} ${material}`)
+    PT.recordFill(a[0],a[1],a[2], a[3],a[4],a[5], material)
+  }
 }
 
-// —— 真正打穿房间外墙的“门洞” —— //
+// —— 门（打穿墙体） —— //
 const DOOR_WIDTH   = 1
-const DOOR_HEIGHT  = 2   // 门高 2 格（够走路），需要更高可改 3
+const DOOR_HEIGHT  = 2
 const DOOR_PAD_MS  = 200
-
-// 在指定 x,z 的墙线位置打一个 宽*高 的门洞（清空为空气）
 async function carveVerticalDoor(x, z, height = DOOR_HEIGHT, width = DOOR_WIDTH) {
   const y1 = LAYOUT_Y + 1
   const y2 = LAYOUT_Y + height
@@ -399,108 +526,135 @@ async function carveVerticalDoor(x, z, height = DOOR_HEIGHT, width = DOOR_WIDTH)
   const xr = x + Math.floor(width / 2)
   await Q.chatCommand(`fill ${xl} ${y1} ${z} ${xr} ${y2} ${z} air`, DOOR_PAD_MS)
 }
-
-// 根据布局在与走廊接缝的那条“房间外墙”开门：
-// 上侧房矩形 z=24..35 → 外墙在 z=24 （紧贴走廊上沿 z=23）
-// 下侧房矩形 z= 1..15 → 外墙在 z=15 （紧贴走廊下沿 z=16）
 async function carveAllDoors() {
-  // 配置中的 topZ / bottomZ 表示房间外墙 z；直接打穿该墙体
-  const topWallZ = TOP_WALL_Z
-  const botWallZ = BOT_WALL_Z
-  for (const x of DOOR_XS) await carveVerticalDoor(x + SHIFT_X, topWallZ)
-  for (const x of DOOR_XS) await carveVerticalDoor(x + SHIFT_X, botWallZ)
+  for (const x of DOOR_XS) await carveVerticalDoor(x + SHIFT_X, TOP_WALL_Z)
+  for (const x of DOOR_XS) await carveVerticalDoor(x + SHIFT_X, BOT_WALL_Z)
 }
 
-// —— 构建布局 —— //
-async function buildLayout(){
-  console.log('🧱 开始搭建 baseline 布局…')
-  ev('BUILD_BEGIN', { flat: IS_FLAT })
-  if (AUTO_GROUND) {
-    const gy = await detectGroundYNearCorridor()
-    if (Number.isFinite(gy)) {
-      LAYOUT_Y = gy
-      recomputeDerived()
-      console.log('📐 AutoGround: 采用探测到的地表层 LAYOUT_Y =', LAYOUT_Y)
-    } else {
-      console.log('📐 AutoGround: 未成功探测地表，沿用默认 LAYOUT_Y =', LAYOUT_Y)
-    }
+// —— 清理&地面恢复（clean） —— //
+async function clearVerticalSlice(x1, x2, z1, z2, startY){
+  const top = (bot?.game?.height && Number.isFinite(bot.game.height)) ? bot.game.height - 1 : 255
+  const area = (x2 - x1 + 1) * (z2 - z1 + 1)
+  const maxH = Math.max(1, Math.floor(32768 / Math.max(1, area))) // fill 上限保护
+  let y = Math.max(0, startY)
+  while (y <= top){
+    const yEnd = Math.min(top, y + maxH - 1)
+    await Q.chatCommand(`fill ${x1} ${y} ${z1} ${x2} ${yEnd} ${z2} air`, CMD_HEAVY_PAD_MS)
+    y = yEnd + 1
   }
-  // 若存在上一次构建位置：仅清理“地面以上”空间，保留地面层，避免悬空
-  const lastFile = path.join(OUT, 'last_build.json')
-  try {
-    const raw = await fsp.readFile(lastFile, 'utf8')
-    const last = JSON.parse(raw)
-    if (Number.isFinite(last.shiftX) && Number.isFinite(last.shiftZ) && Number.isFinite(last.layoutY)) {
-      await Q.chatCommand(
-        `fill ${FRAME.x1 + last.shiftX} ${last.layoutY + 1} ${FRAME.z1 + last.shiftZ} ${FRAME.x2 + last.shiftX} ${last.layoutY + 10} ${FRAME.z2 + last.shiftZ} air`,
-        CMD_HEAVY_PAD_MS
-      )
-      // 用草方块覆盖上一版本的地面层，恢复“自然地面”视觉
-      await Q.chatCommand(
-        `fill ${FRAME.x1 + last.shiftX} ${last.layoutY} ${FRAME.z1 + last.shiftZ} ${FRAME.x2 + last.shiftX} ${last.layoutY} ${FRAME.z2 + last.shiftZ} grass_block`,
-        CMD_HEAVY_PAD_MS
-      )
-    }
-  } catch (_) { /* 首次构建或读取失败，忽略 */ }
+}
+async function cleanMap(){
+  console.log('🧹 clean：精准清理 + 恢复地表')
+  await Q.chatCommand('difficulty peaceful', 400)
+  await Q.chatCommand('gamerule doMobSpawning false', 400)
+  await Q.chatCommand('gamerule doDaylightCycle false', 400)
+  await Q.chatCommand('time set day', 400)
+  await Q.chatCommand('gamerule doWeatherCycle false', 400)
+  await Q.chatCommand('weather clear 1000000', 400)
+  await Q.chatCommand('gamemode creative @a', 400)
+  // 不再 kill 生物；只清理临时掉落物/投射物/经验球，保留所有村民与玩家
+  const ephemeral = ['item','arrow','experience_orb','firework_rocket','tnt','falling_block','boat','chest_boat','minecart','tnt_minecart','furnace_minecart','hopper_minecart','chest_minecart','painting','item_frame','glow_item_frame','armor_stand']
+  for (const t of ephemeral) {
+    await Q.chatCommand(`kill @e[type=${t}]`, 150)
+  }
 
-  // 当前目标区域：清理地面以上空间，并为地面层铺设草（防止出现大片空气导致建筑“漂浮”）
-  await Q.chatCommand(
-    `fill ${FRAME.x1 + SHIFT_X} ${LAYOUT_Y + 1} ${FRAME.z1 + SHIFT_Z} ${FRAME.x2 + SHIFT_X} ${LAYOUT_Y + 10} ${FRAME.z2 + SHIFT_Z} air`,
-    CMD_HEAVY_PAD_MS
-  )
-  await Q.chatCommand(
-    `fill ${FRAME.x1 + SHIFT_X} ${LAYOUT_Y} ${FRAME.z1 + SHIFT_Z} ${FRAME.x2 + SHIFT_X} ${LAYOUT_Y} ${FRAME.z2 + SHIFT_Z} grass_block`,
-    CMD_HEAVY_PAD_MS
-  )
+  // 仅清理“曾经放过”的结构
+  await PT.clearAll(Q)
 
-  // 铺设主走廊地面（来自配置）
-  await fillRect(CORRIDOR_MAIN,  CONF.corridor_floor || 'white_concrete')
+  // 把实验框架 FRAME 的地面层刷回草（一层）
+  const x1 = FRAME.x1 + SHIFT_X, x2 = FRAME.x2 + SHIFT_X
+  const z1 = FRAME.z1 + SHIFT_Z, z2 = FRAME.z2 + SHIFT_Z
+  await Q.chatCommand(`fill ${x1} ${LAYOUT_Y} ${z1} ${x2} ${LAYOUT_Y} ${z2} grass_block`, CMD_HEAVY_PAD_MS)
+  PT.recordFill(x1, LAYOUT_Y, z1, x2, LAYOUT_Y, z2, 'grass_block')
 
-  // 铺设房间地面，并砌3格高的墙（不封顶）
+  await Q.chatCommand(`setworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 300)
+  console.log('✅ clean 完成（未 kill 任何生物）')
+}
+
+// —— 构建布局（build） —— //
+async function buildLayout(){
+  console.log('🧱 build：按 layout 在固定高度搭建')
+  ev('BUILD_BEGIN', {})
+
+  // 铺走廊
+  if ((CORRIDOR_MAIN?.w ?? 0) > 0 && (CORRIDOR_MAIN?.h ?? 0) > 0) {
+    await fillRect(CORRIDOR_MAIN,  CONF.corridor_floor || 'white_concrete')
+  }
+
+  // 房间地面 + 墙
   for (const r of ROOMS_TOP){
-    await fillRect(r, r.block)
+    await fillRect(r, r.block || 'white_concrete')
     await buildWalls(r, CONF.wall?.material || 'white_concrete', CONF.wall?.height || 3)
   }
   for (const r of ROOMS_BOTTOM){
-    await fillRect(r, r.block)
+    await fillRect(r, r.block || 'white_concrete')
     await buildWalls(r, CONF.wall?.material || 'white_concrete', CONF.wall?.height || 3)
   }
 
-  // 在与走廊接壤的外墙上“打门洞”（真正打穿墙体）
+  // 开门
   await carveAllDoors()
 
-  // 标出两个出口（走廊两端中线）
-  for (const ex of EXITS){
-    await Q.chatCommand(`setblock ${ex.x} ${LAYOUT_Y} ${ex.z} ${CONF.exit_marker || 'green_wool'}`)
+  // 出口标记（若走廊有效）
+  if ((CORRIDOR_MAIN?.w ?? 0) > 0 && (CORRIDOR_MAIN?.h ?? 0) > 0) {
+    for (const ex of EXITS){
+      await Q.chatCommand(`setblock ${ex.x} ${LAYOUT_Y} ${ex.z} ${CONF.exit_marker || 'green_wool'}`)
+      PT.recordSet(ex.x, LAYOUT_Y, ex.z, CONF.exit_marker || 'green_wool')
+    }
   }
 
-  // 传送 bot 到内部同步点
-  await Q.chatCommand(`tp ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 800)
-
+  // 选择一个走廊内“可站立”的安全点作为新的内部同步点，并传送过去
+  let base = corridorCenterPos()
+  let safe = findSafeSpotNearCorridor(base, 8)
+  if (!safe) {
+    // 若仍未找到，退回原点上方 2 格尝试（极端兜底）
+    safe = { x: SPAWN_X, y: LAYOUT_Y + 2, z: SPAWN_Z }
+  }
+  updateSpawn(safe)
+  await Q.chatCommand(`setworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 400)
+  await Q.chatCommand(`tp ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 500)
   ev('BUILD_DONE')
-  console.log('✅ 布局完成')
-
-  // 记录本次构建位置，供下次清理使用
-  try {
-    const meta = { shiftX: SHIFT_X, shiftZ: SHIFT_Z, layoutY: LAYOUT_Y, t: Date.now() }
-    await fsp.writeFile(lastFile, JSON.stringify(meta))
-  } catch (_) { /* 忽略写入失败 */ }
+  console.log('✅ build 完成（固定高度，无抬高，原点贴齐）')
 }
 
-async function spawnActors(){
-  console.log('👥 生成 3 个村民 …')
-  await Q.chatCommand('kill @e[type=villager]', 800)
-  // 与门点大致对应的三个位置（上1/上2/下3）
-  const spots = [
-    new Vec3((DOOR_XS[0] || 20) + SHIFT_X, LAYOUT_Y, TOP_DOOR_Z_CORRIDOR),
-    new Vec3((DOOR_XS[1] || 52) + SHIFT_X, LAYOUT_Y, TOP_DOOR_Z_CORRIDOR),
-    new Vec3((DOOR_XS[2] || 84) + SHIFT_X, LAYOUT_Y, BOT_DOOR_Z_CORRIDOR)
-  ]
-  for (const p of spots) await Q.chatCommand(`summon villager ${p.x} ${p.y} ${p.z}`)
-  ev('SPAWN', { villagers: spots.length })
-  console.log('✅ 生成完成')
+// —— occupants：按房间随机放置 occupants（villager） —— //
+function randInt(a, b){ return Math.floor(Math.random() * (b - a + 1)) + a }
+function* randomPointsInRoom(room, n){
+  const xMin = room.x + 1 + SHIFT_X
+  const xMax = room.x + room.w - 2 + SHIFT_X
+  const zMin = room.z + 1 + SHIFT_Z
+  const zMax = room.z + room.h - 2 + SHIFT_Z
+  for (let i=0; i<n; i++){
+    yield { x: randInt(xMin, xMax), y: LAYOUT_Y, z: randInt(zMin, zMax) }
+  }
+}
+async function spawnOccupants(){
+  const nPerRoom = Number(CONF?.occupants?.num ?? CONF?.occupants?.per_room ?? 5)
+  if (!Number.isFinite(nPerRoom) || nPerRoom <= 0) {
+    console.log('👥 occupants.num 无效，跳过生成'); return
+  }
+  console.log(`👥 occupants：每房目标 ${nPerRoom}，仅补足缺口，不 kill 现有村民`)
+  const rooms = [...ROOMS_TOP, ...ROOMS_BOTTOM]
+  const villEntities = Object.values(bot.entities).filter(e => e.name === 'villager')
+  let totalAdded = 0
+  for (const room of rooms){
+    const x1 = room.x + SHIFT_X, x2 = room.x + room.w - 1 + SHIFT_X
+    const z1 = room.z + SHIFT_Z, z2 = room.z + room.h - 1 + SHIFT_Z
+    const existing = villEntities.filter(v => {
+      const p = v.position
+      return p.x >= x1+1 && p.x <= x2-1 && p.z >= z1+1 && p.z <= z2-1 && Math.abs(p.y - LAYOUT_Y) <= 1
+    }).length
+    const need = Math.max(0, nPerRoom - existing)
+    let placed = 0
+    for (const p of randomPointsInRoom(room, need)){
+      await Q.chatCommand(`summon villager ${p.x} ${p.y} ${p.z} {Tags:["keep"]}`, 500)
+      placed += 1; totalAdded += 1
+    }
+    console.log(`  - 房间(${room.x},${room.z},${room.w}x${room.h}) 已有 ${existing}，新增 ${placed} → 目标 ${nPerRoom}`)
+  }
+  console.log(`✅ occupants 完成，总新增 ${totalAdded}（无 kill）`)
 }
 
+// —— demo 巡逻（保留） —— //
 async function startPatrol(){
   if (LOCKED) { console.log('🔒 当前为锁定状态：忽略巡逻请求'); return }
   if (demoTimer) clearInterval(demoTimer)
@@ -534,7 +688,6 @@ async function startPatrol(){
       if (dwell >= DWELL_K){ patrolIdx += 1; dwell = 0 }
     }
 
-    // 低频挪动村民，保持命令总量低
     if (tick % 80 === 0){
       const vill = Object.values(bot.entities).filter(e=>e.name==='villager')
       for (const v of vill){
@@ -548,29 +701,28 @@ async function startPatrol(){
         logVill(v.id, to); ev('VILLAGER_STEP', { id: v.id, to })
       }
     }
-  }, 300) // ~3.3Hz，降低 tick 频率
+  }, 300)
 }
-
 function stopPatrol(){
   if (demoTimer) clearInterval(demoTimer)
   demoTimer = null
   ev('DEMO_STOP'); console.log('⏹️ 巡逻结束')
 }
 
-// 若不写 world，用事件与心跳替代 datapack 的首登/日晴强制
+// —— 如果禁用 datapack，用事件兜底 —— //
 if (!USE_DATAPACK) {
-  // 新玩家加入后立刻拉到创造并传送到同步点
   bot.on('playerJoined', (p) => {
     if (!p?.username || p.username === BOT_NAME) return
     Q.chatCommand(`gamemode creative ${p.username}`, 500)
     Q.chatCommand(`tp ${p.username} ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 700)
   })
-  // 简易心跳：每 15 秒巩固一次白天晴天（避免被手动更改）
   setInterval(() => {
     Q.chatCommand('time set day', 500)
     Q.chatCommand('weather clear 1000000', 500)
   }, 15000)
 }
+
+// —— 派生数据重算 —— //
 function recomputeDerived() {
   SPAWN_Y = LAYOUT_Y + 1
   DOOR_POS = [
@@ -579,15 +731,14 @@ function recomputeDerived() {
   ]
   PATROL = [...DOOR_POS]
   EXITS = [
-    { x: CORRIDOR_MAIN.x + SHIFT_X,                       y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor(CORRIDOR_MAIN.h/2) + SHIFT_Z },
-    { x: CORRIDOR_MAIN.x + CORRIDOR_MAIN.w - 1 + SHIFT_X, y: LAYOUT_Y, z: CORRIDOR_MAIN.z + Math.floor(CORRIDOR_MAIN.h/2) + SHIFT_Z },
+    { x: (CORRIDOR_MAIN.x ?? 0) + SHIFT_X, y: LAYOUT_Y, z: (CORRIDOR_MAIN.z ?? 0) + Math.floor((CORRIDOR_MAIN.h||1)/2) + SHIFT_Z },
+    { x: (CORRIDOR_MAIN.x ?? 0) + (CORRIDOR_MAIN.w||1) - 1 + SHIFT_X, y: LAYOUT_Y, z: (CORRIDOR_MAIN.z ?? 0) + Math.floor((CORRIDOR_MAIN.h||1)/2) + SHIFT_Z },
   ]
 }
 recomputeDerived()
-// 自动贴地开关：AUTO_GROUND=1 开启（默认开启）
-// const AUTO_GROUND = process.env.AUTO_GROUND !== '0'
-const AUTO_GROUND = process.env.AUTO_GROUND !== '0' && process.env.FLAT !== '1'
 
+// —— 地面探测（保留，默认关闭自动贴地） —— //
+const AUTO_GROUND = false
 function getBlockSafe(x, y, z) {
   try {
     if (bot?.world?.getBlock) return bot.world.getBlock(new Vec3(x, y, z))
@@ -595,141 +746,66 @@ function getBlockSafe(x, y, z) {
   } catch (_) {}
   return null
 }
-// 取 (x,z) 的“最高实心块之上那一层”作为地表层
 function highestSurfaceYAt(x, z) {
-  // 若世界尚未就绪（未 spawn / 已断开），直接放弃探测
   if (!bot?.world && typeof bot?.blockAt !== 'function') return null
-
   const yMax = (bot?.game?.height && Number.isFinite(bot.game.height)) ? bot.game.height - 1 : 255
   for (let y = yMax; y >= 0; y--) {
     const b = getBlockSafe(x, y, z)
     if (!b) continue
     const name = b.name || ''
-    if (name !== 'air' && !name.includes('water') && !name.includes('lava')) {
-      return y + 1
-    }
+    if (name !== 'air' && !name.includes('water') && !name.includes('lava')) return y + 1
   }
   return null
 }
-// 在走廊中线附近采样多个点，取中位数，得到稳健的 LAYOUT_Y
 async function detectGroundYNearCorridor() {
-  // 不强制 tp，直接在目标区域采样；避免某些服务端因命令/协议断开
-  // 若区块未加载，getBlockSafe 会返回 null，我们有回退逻辑
-
-  const cz = Math.round(CORRIDOR_MAIN.z + 4 + SHIFT_Z)
+  const cz = Math.round((CORRIDOR_MAIN.z ?? 0) + Math.floor((CORRIDOR_MAIN.h||1)/2) + SHIFT_Z)
   const xs = [0.1, 0.3, 0.5, 0.7, 0.9].map(
-    t => Math.round(CORRIDOR_MAIN.x + t * (CORRIDOR_MAIN.w - 1) + SHIFT_X)
+    t => Math.round((CORRIDOR_MAIN.x ?? 0) + t * ((CORRIDOR_MAIN.w || 1) - 1) + SHIFT_X)
   )
-
-  // 如果 bot 已经在世界里，稍等一会让附近区块加载好
   if (bot?.entity) await sleep(300)
-
   const samples = []
   for (const x of xs) {
     const y = highestSurfaceYAt(x, cz)
     if (Number.isFinite(y)) samples.push(y)
   }
   if (samples.length === 0) {
-    // 回退策略：若已 spawn，则用“当前脚下-1”估算地面，否则沿用默认 LAYOUT_Y
     if (bot?.entity?.position) return Math.max(0, Math.floor(bot.entity.position.y - 1))
     return null
   }
   samples.sort((a, b) => a - b)
   return samples[Math.floor(samples.length / 2)]
 }
-// ---------- 聊天命令（保留） ----------
+
+// ---------- 聊天命令 ----------
 bot.on('chat', async (username, message)=>{
   if (!username || username === BOT_NAME) return
   const msg = message.trim().toLowerCase()
-  if (msg.includes('build'))  await buildLayout()
-  else if (msg.includes('spawn'))   await spawnActors()
+  if (msg === 'clean')        await cleanMap()
+  else if (msg === 'build')   await buildLayout()
+  else if (msg === 'occupants') await spawnOccupants()
   else if (msg.includes('patrol') || msg.includes('demo')) await startPatrol()
-  else if (msg.includes('stop'))    stopPatrol()
-  else if (msg === 'clearabove' || msg === 'clear' ) {
-    // 清除地面以上的大范围方块（不动地面），高度到 +50，保证干净
-    await Q.chatCommand(`fill ${FRAME.x1 + SHIFT_X} ${LAYOUT_Y+1} ${FRAME.z1 + SHIFT_Z} ${FRAME.x2 + SHIFT_X} ${LAYOUT_Y+50} ${FRAME.z2 + SHIFT_Z} air`, CMD_HEAVY_PAD_MS)
-    bot.chat?.('已清理地面以上方块')
-  }
-  else if (msg === 'home' || msg === 'origin') {
-    lockToOrigin(); bot.chat?.('回到原点并锁定')
-  }
-  else if (msg.includes('syncme'))  lockToNearestPlayer()
-  else if (msg.includes('lockorigin')) lockToOrigin()
+  else if (msg === 'stop')    stopPatrol()
+  else if (msg === 'status')  bot.chat?.(`cleared ${doorsState.filter(d=>d.cleared).length}/${doorsState.length}, tick=${tick}`)
+  else if (msg === 'home' || msg === 'origin') { lockToOrigin(); bot.chat?.('回到原点并锁定') }
   else if (msg.includes('unlock')) unlockMovement()
-  else if (msg.includes('status'))  bot.chat?.(`cleared ${doorsState.filter(d=>d.cleared).length}/${doorsState.length}, tick=${tick}`)
   else if (msg.includes('quit') || msg.includes('exit')) { stopPatrol(); bot.chat?.('再见！'); setTimeout(()=>bot.quit(), 300) }
-  else bot.chat?.('我听懂：build / spawn / patrol / stop / status / quit')
+  else if (msg === 'border') { await applyWorldBorder(16); bot.chat?.('WorldBorder set.') }
+  else bot.chat?.('我听懂：clean / build / occupants / spawn / patrol / stop / status / quit')
 })
 
 // ---------- 终端菜单 ----------
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-console.log('\n🧭 控制菜单：\n----------------------------------\n build   → 生成建筑布局\n spawn   → 生成村民\n patrol  → 开始巡逻\n stop    → 停止巡逻\n status  → 查看状态\n quit    → 退出程序\n----------------------------------\n')
+console.log('\n🧭 控制菜单：\n----------------------------------\n clean      → 清空并初始化环境（仅清临时实体）\n build      → 生成/重建布局\n occupants  → 按房间补足村民，不移除现有\n patrol     → 开始巡逻\n stop       → 停止巡逻\n status     → 查看门清理进度\n quit       → 退出程序\n----------------------------------\n')
 rl.on('line', async (input)=>{
   const msg = input.trim().toLowerCase()
-  if (msg === 'build')       await buildLayout()
-  else if (msg === 'build?') {
-    console.log('\n可选布局:')
-    console.log('  1) baseline (layout/baseline.json)')
-    console.log('  2) layout_1 (layout/layout_1.json)')
-    console.log('  3) layout_2 (layout/layout_2.json)')
-    console.log('输入编号或名称继续 (例如: 2 或 layout_1)，空回车取消')
-    rl.question('选择布局: ', async ans => {
-      const a = ans.trim().toLowerCase()
-      if (!a) return console.log('取消。')
-      const mapping = { '1':'baseline', '2':'layout_1', '3':'layout_2' }
-      const chosen = mapping[a] || a
-      await switchBuilding(chosen)
-    })
-  }
-  else if (msg === 'spawn')  await spawnActors()
-  else if (msg === 'patrol') await startPatrol()
-  else if (msg === 'stop')   stopPatrol()
-  else if (msg === 'clearabove' || msg === 'clear') {
-    await Q.chatCommand(`fill ${FRAME.x1 + SHIFT_X} ${LAYOUT_Y+1} ${FRAME.z1 + SHIFT_Z} ${FRAME.x2 + SHIFT_X} ${LAYOUT_Y+50} ${FRAME.z2 + SHIFT_Z} air`, CMD_HEAVY_PAD_MS)
-    console.log('🧼 已清理地面以上方块')
-  }
-  else if (msg === 'home' || msg === 'origin') { lockToOrigin(); console.log('🏠 回到原点并锁定') }
-  else if (msg === 'syncme') lockToNearestPlayer()
-  else if (msg === 'lockorigin') lockToOrigin()
-  else if (msg === 'unlock') unlockMovement()
+  if (msg === 'clean')        await cleanMap()
+  else if (msg === 'build')   await buildLayout()
+  else if (msg === 'occupants') await spawnOccupants()
+  else if (msg === 'patrol')  await startPatrol()
+  else if (msg === 'stop')    stopPatrol()
   else if (msg === 'status'){ console.log(`状态: cleared ${doorsState.filter(d=>d.cleared).length}/${doorsState.length}, tick=${tick}`) }
   else if (msg === 'quit' || msg === 'exit') { stopPatrol(); console.log('👋 Bye'); setTimeout(()=>{ rl.close(); bot.quit(); process.exit(0) }, 300) }
-  else console.log('未知命令：build / spawn / patrol / stop / status / quit')
+  else if (msg === 'border') { await applyWorldBorder(16) }
+  else console.log('未知命令：clean / build / occupants / spawn / patrol / stop / status / quit')
 })
 
-// —— 切换布局：重新读取 JSON，重算派生数据并执行 build —— //
-async function switchBuilding(name){
-  try {
-    const candidates = [
-      path.resolve(__dirname, 'buildings', 'configs', `${name}.json`),
-      path.resolve(__dirname, '../layout', `${name}.json`)
-    ]
-    let loaded = null
-    for (const pth of candidates){
-      try {
-        const raw = await fsp.readFile(pth, 'utf8')
-        CONF = JSON.parse(raw)
-        loaded = pth
-        break
-      } catch (_) {}
-    }
-    if (!loaded) {
-      console.log(`[building] 未找到 ${name}.json，保留当前布局`) ; return
-    }
-    console.log(`[building] 切换到 ${name}.json -> ${path.relative(process.cwd(), loaded)}`)
-    // 更新核心引用
-    Object.assign(FRAME, CONF.frame)
-    Object.assign(CORRIDOR_MAIN, CONF.corridor)
-    // 更新房间、门等（注意不可直接重新赋值常量，这里用重新生成数组方式）
-    ROOMS_TOP.splice(0, ROOMS_TOP.length, ...(CONF.rooms_top||[]))
-    ROOMS_BOTTOM.splice(0, ROOMS_BOTTOM.length, ...(CONF.rooms_bottom||[]))
-    // 门配置
-    const doorsDef = CONF.doors || {}
-    DOOR_XS.splice(0, DOOR_XS.length, ...(Array.isArray(doorsDef.xs)?doorsDef.xs:[20,52,84]))
-    // 重算外墙 Z 与巡逻/出口等派生
-    recomputeDerived()
-    await buildLayout()
-  } catch (e){
-    console.log('[building] 切换失败：', e?.message || e)
-  }
-}
