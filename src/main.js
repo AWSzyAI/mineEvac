@@ -392,7 +392,11 @@ bot.once('spawn', async () => {
     await Q.chatCommand('time set day', 800)
     await Q.chatCommand('gamerule doWeatherCycle false', 800)
     await Q.chatCommand('weather clear 1000000', 800)
-    if (USE_DATAPACK) await Q.chatCommand('reload', 800)
+  if (USE_DATAPACK) await Q.chatCommand('reload', 800)
+
+  // 将所有玩家（含 bot）传送到内部同步点，一次性对齐环境
+  await Q.chatCommand(`setworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 400)
+  await Q.chatCommand(`tp @a ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 800)
 
     mcData = minecraftData(bot.version)
     movements = new Movements(bot, mcData)
