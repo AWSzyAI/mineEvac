@@ -15,12 +15,14 @@ import readline from 'readline'
 import { fileURLToPath } from 'url'
 
 // ---------- 可选：viewer ----------
-let mineflayerViewer = null
+let mineflayerViewer;
 try {
-  const pv = await import('prismarine-viewer')
-  mineflayerViewer = pv.mineflayer || pv.default?.mineflayer || null
-} catch (_) {
-  // 未安装就忽略
+  const mod = await import('prismarine-viewer'); // dynamic import
+  mineflayerViewer = mod.mineflayer || mod.default?.mineflayer;
+  console.log('✔ prismarine-viewer 模块已导入:', mineflayerViewer);
+} catch (e) {
+  mineflayerViewer = null;
+  console.error('✘ prismarine-viewer 导入失败:', e);
 }
 
 // ---------- 小工具 ----------
@@ -155,6 +157,7 @@ let SPAWN_Y = LAYOUT_Y + 1
 // 房间来自配置
 const ROOMS_TOP = [...(CONF.rooms_top || [])]
 const ROOMS_BOTTOM = [...(CONF.rooms_bottom || [])]
+const rooms = [...ROOMS_TOP, ...ROOMS_BOTTOM];
 
 // 门配置（在与走廊外墙相接处开门）
 const DOOR_XS = Array.isArray(CONF.doors?.xs) ? [...CONF.doors.xs] : [20, 52, 84]
@@ -557,22 +560,29 @@ async function cleanMap(){
   await Q.chatCommand('weather clear 1000000', 400)
   await Q.chatCommand('gamemode creative @a', 400)
   // 不再 kill 生物；只清理临时掉落物/投射物/经验球，保留所有村民与玩家
-  const ephemeral = ['item','arrow','experience_orb','firework_rocket','tnt','falling_block','boat','chest_boat','minecart','tnt_minecart','furnace_minecart','hopper_minecart','chest_minecart','painting','item_frame','glow_item_frame','armor_stand']
-  for (const t of ephemeral) {
-    await Q.chatCommand(`kill @e[type=${t}]`, 150)
-  }
+  // const ephemeral = ['item','arrow','experience_orb','firework_rocket','tnt','falling_block','boat','chest_boat','minecart','tnt_minecart','furnace_minecart','hopper_minecart','chest_minecart','painting','item_frame','glow_item_frame','armor_stand']
+  // for (const t of ephemeral) {
+  //   await Q.chatCommand(`kill @e[type=${t}]`, 150)
+  // }
 
   // 仅清理“曾经放过”的结构
   await PT.clearAll(Q)
-
-  // 把实验框架 FRAME 的地面层刷回草（一层）
+ 
+  // ** 新增：清除墙体以上／中通道以上的残留 **  
   const x1 = FRAME.x1 + SHIFT_X, x2 = FRAME.x2 + SHIFT_X
   const z1 = FRAME.z1 + SHIFT_Z, z2 = FRAME.z2 + SHIFT_Z
+  const y1 = LAYOUT_Y + 1
+  const y2 = LAYOUT_Y + ((CONF.wall?.height || 3) + 1 + (CONF.corridor?.height || 0)) // 调整上限
+  await Q.chatCommand(`fill ${x1} ${y1} ${z1} ${x2} ${y2} ${z2} air`, CMD_HEAVY_PAD_MS)
+
+  // 把地面层刷回草
   await Q.chatCommand(`fill ${x1} ${LAYOUT_Y} ${z1} ${x2} ${LAYOUT_Y} ${z2} grass_block`, CMD_HEAVY_PAD_MS)
   PT.recordFill(x1, LAYOUT_Y, z1, x2, LAYOUT_Y, z2, 'grass_block')
+ // 清理村民
+  await Q.chatCommand(`kill @e[type=minecraft:villager]`, 300)
 
   await Q.chatCommand(`setworldspawn ${SPAWN_X} ${SPAWN_Y} ${SPAWN_Z}`, 300)
-  console.log('✅ clean 完成（未 kill 任何生物）')
+  console.log('✅ clean 完成')
 }
 
 // —— 构建布局（build） —— //
@@ -631,31 +641,30 @@ function* randomPointsInRoom(room, n){
     yield { x: randInt(xMin, xMax), y: LAYOUT_Y, z: randInt(zMin, zMax) }
   }
 }
+async function findGroundY(x, z) {
+  const y0 = await highestSurfaceYAt(x, z);
+  if (!Number.isFinite(y0)) return LAYOUT_Y;
+  return y0 + 1;
+}
+
 async function spawnOccupants(){
-  const nPerRoom = Number(CONF?.occupants?.num ?? CONF?.occupants?.per_room ?? 5)
-  if (!Number.isFinite(nPerRoom) || nPerRoom <= 0) {
-    console.log('👥 occupants.num 无效，跳过生成'); return
-  }
-  console.log(`👥 occupants：每房目标 ${nPerRoom}，仅补足缺口，不 kill 现有村民`)
-  const rooms = [...ROOMS_TOP, ...ROOMS_BOTTOM]
-  const villEntities = Object.values(bot.entities).filter(e => e.name === 'villager')
-  let totalAdded = 0
+  const nPerRoom = Number(CONF?.occupants?.num ?? 5);
   for (const room of rooms){
-    const x1 = room.x + SHIFT_X, x2 = room.x + room.w - 1 + SHIFT_X
-    const z1 = room.z + SHIFT_Z, z2 = room.z + room.h - 1 + SHIFT_Z
-    const existing = villEntities.filter(v => {
-      const p = v.position
-      return p.x >= x1+1 && p.x <= x2-1 && p.z >= z1+1 && p.z <= z2-1 && Math.abs(p.y - LAYOUT_Y) <= 1
-    }).length
-    const need = Math.max(0, nPerRoom - existing)
-    let placed = 0
-    for (const p of randomPointsInRoom(room, need)){
-      await Q.chatCommand(`summon villager ${p.x} ${p.y} ${p.z} {Tags:["keep"]}`, 500)
-      placed += 1; totalAdded += 1
+    const xMin = room.x + 1 + SHIFT_X;
+    const xMax = room.x + room.w - 2 + SHIFT_X;
+    const zMin = room.z + 1 + SHIFT_Z;
+    const zMax = room.z + room.h - 2 + SHIFT_Z;
+    let placed = 0;
+    for (let i = 0; i < nPerRoom; i++){
+      const x = randInt(xMin, xMax);
+      const z = randInt(zMin, zMax);
+      const y = await findGroundY(x, z);
+      await Q.chatCommand(`summon villager ${x} ${y} ${z} {Tags:["keep"]}`, 500);
+      placed++;
     }
-    console.log(`  - 房间(${room.x},${room.z},${room.w}x${room.h}) 已有 ${existing}，新增 ${placed} → 目标 ${nPerRoom}`)
+    console.log(`  - 房间(${room.x},${room.z}) 新增 ${placed}`);
   }
-  console.log(`✅ occupants 完成，总新增 ${totalAdded}（无 kill）`)
+  console.log(`✅ occupants 完成`);
 }
 
 // —— demo 巡逻（保留） —— //
@@ -794,7 +803,7 @@ bot.on('chat', async (username, message)=>{
   else if (msg.includes('unlock')) unlockMovement()
   else if (msg.includes('quit') || msg.includes('exit')) { stopPatrol(); bot.chat?.('再见！'); setTimeout(()=>bot.quit(), 300) }
   else if (msg === 'border') { await applyWorldBorder(16); bot.chat?.('WorldBorder set.') }
-  else bot.chat?.('我听懂：clean / build / occupants / spawn / patrol / stop / status / quit')
+  else bot.chat?.('我听懂：clean / build / occupants / patrol / stop / status / quit')
 })
 
 // ---------- 终端菜单 ----------
@@ -810,6 +819,6 @@ rl.on('line', async (input)=>{
   else if (msg === 'status'){ console.log(`状态: cleared ${doorsState.filter(d=>d.cleared).length}/${doorsState.length}, tick=${tick}`) }
   else if (msg === 'quit' || msg === 'exit') { stopPatrol(); console.log('👋 Bye'); setTimeout(()=>{ rl.close(); bot.quit(); process.exit(0) }, 300) }
   else if (msg === 'border') { await applyWorldBorder(16) }
-  else console.log('未知命令：clean / build / occupants / spawn / patrol / stop / status / quit')
+  else console.log('未知命令：clean / build / occupants / patrol / stop / status / quit')
 })
 
